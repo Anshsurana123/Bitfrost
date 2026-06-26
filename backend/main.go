@@ -398,3 +398,153 @@ func main() {
 						semanticStore = append(semanticStore, SemanticEntry{
 							CompanyID: compID,
 							Embedding: emb,
+							Response:  pBody,
+						})
+						semanticMu.Unlock()
+						log.Printf("[CACHE] Local semantic brain trained on new prompt (Tenant: %s)", compID)
+					}
+				}(string(reqBody), respBody, companyID)
+
+				return nil
+			},
+			Transport:  customTransport,
+			BufferPool: &BufferPool{pool: &sync.Pool{New: func() interface{} { return make([]byte, 32*1024) }}},
+		},
+		kvStore:        kvStore,
+		ollamaURL:      ollamaURL,
+		ollamaAPIKey:   os.Getenv("OLLAMA_API_KEY"),
+		circuitBreaker: &CircuitBreaker{},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/metrics", wsHandler)
+	mux.HandleFunc("/api/keys/generate", proxy.handleKeyGenerate)
+	mux.HandleFunc("/api/keys/rotate", proxy.handleKeyRotate)
+	mux.HandleFunc("/api/settings/cache", proxy.handleSettings)
+	mux.HandleFunc("/mcp", proxy.handleMCP)
+	mux.HandleFunc("/", proxy.ServeHTTP)
+
+	// Configure CORS for the Key Vault UI
+	corsHandler := func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-Device-ID, X-Timestamp, X-Bifrost-Key, X-Device-Fingerprint")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			h.ServeHTTP(w, r)
+		})
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("Starting BIFRÖST Sovereign Proxy on :%s (MULTI-TENANT MODE)", port)
+	log.Fatal(http.ListenAndServe(":"+port, corsHandler(mux)))
+}
+
+// --- Key Vault Logic ---
+
+func (p *BifrostProxy) handleKeyGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		CompanyID string `json:"company_id"`
+		RealKey   string `json:"real_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if req.CompanyID == "" {
+		req.CompanyID = "default"
+	}
+
+	randBytes := make([]byte, 16)
+	rand.Read(randBytes)
+	virtualKey := "bf-vk-" + hex.EncodeToString(randBytes)
+
+	rand.Read(randBytes)
+	appSecret := "sec-" + hex.EncodeToString(randBytes)
+
+	// Bind key to specific company in memory
+	p.kvStore.Set("key_map:"+virtualKey, req.RealKey, 0)
+	p.kvStore.Set("key_company:"+virtualKey, req.CompanyID, 0)
+	p.kvStore.Set("app_secret:"+virtualKey, appSecret, 0)
+
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+	if supabaseUrl != "" && supabaseKey != "" {
+		urlStr := fmt.Sprintf("%s/rest/v1/bifrost_keys", supabaseUrl)
+		payload := map[string]interface{}{
+			"virtual_key": virtualKey,
+			"company_id":  req.CompanyID,
+			"real_key":    req.RealKey,
+			"app_secret":  appSecret,
+		}
+		jsonPayload, _ := json.Marshal(payload)
+		
+		reqObj, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(jsonPayload))
+		reqObj.Header.Set("apikey", supabaseKey)
+		reqObj.Header.Set("Authorization", "Bearer "+supabaseKey)
+		reqObj.Header.Set("Content-Type", "application/json")
+		
+		resp, err := http.DefaultClient.Do(reqObj)
+		if err != nil {
+			log.Printf("[SUPABASE ERROR] Failed to save key: %v", err)
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	// Enable caching by default for new companies
+	if _, err := p.kvStore.Get("cache_enabled:" + req.CompanyID); err != nil {
+		p.kvStore.Set("cache_enabled:"+req.CompanyID, "true", 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"virtual_key": virtualKey,
+		"app_secret":  appSecret,
+		"company_id":  req.CompanyID,
+	})
+}
+
+func (p *BifrostProxy) handleKeyRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		VirtualKey string `json:"virtual_key"`
+		NewRealKey string `json:"new_real_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if req.VirtualKey == "" || req.NewRealKey == "" {
+		http.Error(w, `{"error":"virtual_key and new_real_key are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Update in-memory store
+	p.kvStore.Set("key_map:"+req.VirtualKey, req.NewRealKey, 0)
+	log.Printf("[KEY ROTATION] Virtual key %s rotated to new provider key", req.VirtualKey[:12]+"...")
+
+	// Update in Supabase
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+	if supabaseUrl != "" && supabaseKey != "" {
+		urlStr := fmt.Sprintf("%s/rest/v1/bifrost_keys?virtual_key=eq.%s", supabaseUrl, req.VirtualKey)
