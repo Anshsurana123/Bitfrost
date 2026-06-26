@@ -98,3 +98,153 @@ func (s *InMemoryStore) DecrBy(key string, decrement int64) error {
 		return nil
 	}
 	if str, isStr := val.(string); isStr {
+		if intVal, err := strconv.ParseInt(str, 10, 64); err == nil {
+			s.data[key] = fmt.Sprintf("%d", intVal-decrement)
+		}
+	}
+	return nil
+}
+
+// --- Global Metrics Aggregator ---
+type GlobalMetrics struct {
+	mu             sync.RWMutex
+	RequestCount   int64
+	CacheHits      int64
+	BlockedAttacks int64
+	CurrentLatency int64
+	TotalSavings   float64
+}
+
+var metrics = &GlobalMetrics{}
+
+// --- Semantic Brain Store (MULTI-TENANT) ---
+type SemanticEntry struct {
+	CompanyID string
+	Embedding []float32
+	Response  []byte
+}
+
+var semanticStore []SemanticEntry
+var semanticMu sync.RWMutex
+
+// --- WebSocket Hub ---
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type WSHub struct {
+	clients map[*websocket.Conn]bool
+	mu      sync.Mutex
+}
+
+func (h *WSHub) broadcast(message []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client := range h.clients {
+		if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
+			client.Close()
+			delete(h.clients, client)
+		}
+	}
+}
+
+var wsHub = &WSHub{clients: make(map[*websocket.Conn]bool)}
+
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	wsHub.mu.Lock()
+	wsHub.clients[conn] = true
+	wsHub.mu.Unlock()
+
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			wsHub.mu.Lock()
+			delete(wsHub.clients, conn)
+			wsHub.mu.Unlock()
+			break
+		}
+	}
+}
+
+func startBroadcastLoop() {
+	ticker := time.NewTicker(1 * time.Second)
+	for range ticker.C {
+		metrics.mu.RLock()
+		payload := map[string]interface{}{
+			"type": "METRIC",
+			"payload": map[string]interface{}{
+				"timestamp": time.Now().Format("15:04:05"),
+				"latency":   metrics.CurrentLatency,
+				"savings":   metrics.TotalSavings,
+			},
+		}
+		metrics.mu.RUnlock()
+
+		msg, _ := json.Marshal(payload)
+		wsHub.broadcast(msg)
+	}
+}
+
+func pushWSEvent(eventType string, payload interface{}) {
+	msg, _ := json.Marshal(map[string]interface{}{
+		"type":    eventType,
+		"payload": payload,
+	})
+	wsHub.broadcast(msg)
+}
+
+// --- Infrastructure ---
+
+type BufferPool struct{ pool *sync.Pool }
+
+func (b *BufferPool) Get() []byte  { return b.pool.Get().([]byte) }
+func (b *BufferPool) Put(buf []byte) {
+	if cap(buf) == 32*1024 {
+		buf = buf[:0]
+		b.pool.Put(buf)
+	}
+}
+
+type CircuitBreaker struct {
+	failures    int32
+	lastFailure int64
+}
+
+func (cb *CircuitBreaker) RecordFailure() {
+	atomic.AddInt32(&cb.failures, 1)
+	atomic.StoreInt64(&cb.lastFailure, time.Now().Unix())
+}
+func (cb *CircuitBreaker) RecordSuccess() { atomic.StoreInt32(&cb.failures, 0) }
+func (cb *CircuitBreaker) IsOpen() bool {
+	if atomic.LoadInt32(&cb.failures) >= CBMaxFailures {
+		if time.Now().Unix()-atomic.LoadInt64(&cb.lastFailure) < CBCooldownSeconds {
+			return true
+		}
+	}
+	return false
+}
+
+// BifrostProxy is the core data plane
+type BifrostProxy struct {
+	reverseProxy   *httputil.ReverseProxy
+	kvStore        *InMemoryStore
+	ollamaURL      string
+	ollamaAPIKey   string
+	circuitBreaker *CircuitBreaker
+}
+
+type MCPRequest struct {
+	Method string `json:"method"`
+	Reason string `json:"reason"`
+}
+
+// --- Initialization ---
+
+func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, relying on environment variables")
+	}
+
