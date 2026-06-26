@@ -248,3 +248,153 @@ func main() {
 		log.Println("No .env file found, relying on environment variables")
 	}
 
+	targetURL, _ := url.Parse(UpstreamURL)
+	kvStore := NewInMemoryStore()
+
+	go startBroadcastLoop()
+
+	customTransport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	}
+
+	ollamaURL := os.Getenv("OLLAMA_URL")
+	if ollamaURL == "" {
+		ollamaURL = "https://api.ollama.ai/v1/generate"
+	}
+
+	proxy := &BifrostProxy{
+		reverseProxy: &httputil.ReverseProxy{
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(targetURL)
+				pr.Out.Host = targetURL.Host
+				pr.Out.Header.Del("Accept-Encoding") // Force uncompressed response from Gemini
+				virtualKey := pr.In.Header.Get("X-Bifrost-Key")
+				if virtualKey != "" {
+					realKey, err := kvStore.Get("key_map:" + virtualKey)
+					if err != nil {
+						// Fallback to Supabase if Render restarted
+						supabaseUrl := os.Getenv("SUPABASE_URL")
+						supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+						if supabaseUrl != "" && supabaseKey != "" {
+							urlStr := fmt.Sprintf("%s/rest/v1/bifrost_keys?select=real_key,company_id,app_secret&virtual_key=eq.%s", supabaseUrl, virtualKey)
+							req, _ := http.NewRequest("GET", urlStr, nil)
+							req.Header.Set("apikey", supabaseKey)
+							req.Header.Set("Authorization", "Bearer "+supabaseKey)
+							if resp, err := http.DefaultClient.Do(req); err == nil && resp.StatusCode == 200 {
+								var result []struct {
+									RealKey   string `json:"real_key"`
+									CompanyID string `json:"company_id"`
+									AppSecret string `json:"app_secret"`
+								}
+								if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
+									realKey = result[0].RealKey
+									kvStore.Set("key_map:"+virtualKey, result[0].RealKey, 0)
+									kvStore.Set("key_company:"+virtualKey, result[0].CompanyID, 0)
+									kvStore.Set("app_secret:"+virtualKey, result[0].AppSecret, 0)
+								}
+								resp.Body.Close()
+							}
+						}
+					}
+					
+					if realKey != "" {
+						// Gemini authenticates via ?key= query parameter
+						q := pr.Out.URL.Query()
+						q.Set("key", realKey)
+						pr.Out.URL.RawQuery = q.Encode()
+					}
+				}
+			},
+			ModifyResponse: func(resp *http.Response) error {
+				if resp.StatusCode != http.StatusOK {
+					return nil
+				}
+				reqBody, ok := resp.Request.Context().Value(bodyCtxKey).([]byte)
+				if !ok || len(reqBody) == 0 {
+					return nil
+				}
+				companyID, ok := resp.Request.Context().Value(companyCtxKey).(string)
+				if !ok || companyID == "" {
+					companyID = "default"
+				}
+
+				// Check if this company has caching enabled
+				cacheEnabled, _ := kvStore.Get("cache_enabled:" + companyID)
+				if cacheEnabled == "false" {
+					return nil // Bypass cache storage
+				}
+
+				// Read upstream response
+				respBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return err
+				}
+				resp.Body.Close()
+
+				// Put body back for the client
+				resp.Body = io.NopCloser(bytes.NewBuffer(respBody))
+				resp.ContentLength = int64(len(respBody))
+
+				// Store in L1 Direct Hash Cache & L2 Semantic Cache
+				go func(rBody string, pBody []byte, compID string) {
+					hash := sha256.Sum256([]byte(rBody))
+					hashStr := hex.EncodeToString(hash[:])
+					
+					var reqObj struct {
+						Prompt string `json:"prompt"`
+					}
+					json.Unmarshal([]byte(rBody), &reqObj)
+					promptText := reqObj.Prompt
+					if promptText == "" {
+						promptText = rBody
+					}
+					
+					emb, err := getEmbedding(promptText)
+					if err != nil || len(emb) == 0 {
+						log.Printf("[CACHE ERROR] Aborting cache storage. Semantic Brain embedding failed: %v", err)
+						return
+					}
+
+					supabaseUrl := os.Getenv("SUPABASE_URL")
+					supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+					if supabaseUrl != "" && supabaseKey != "" {
+						urlStr := fmt.Sprintf("%s/rest/v1/bifrost_cache", supabaseUrl)
+						payload := map[string]interface{}{
+							"company_id":  compID,
+							"prompt_text": promptText,
+							"prompt_hash": hashStr,
+							"embedding":   emb,
+							"response":    string(pBody),
+						}
+						jsonPayload, _ := json.Marshal(payload)
+						
+						req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(jsonPayload))
+						req.Header.Set("apikey", supabaseKey)
+						req.Header.Set("Authorization", "Bearer "+supabaseKey)
+						req.Header.Set("Content-Type", "application/json")
+						req.Header.Set("Prefer", "resolution=ignore-duplicates")
+						
+						resp, err := http.DefaultClient.Do(req)
+						if err != nil {
+							log.Printf("[SUPABASE ERROR] Network error: %v", err)
+						} else if resp.StatusCode <= 299 {
+							log.Printf("[SUPABASE] Permanently stored response & embeddings for Tenant %s", compID)
+						} else {
+							errorBody, _ := io.ReadAll(resp.Body)
+							log.Printf("[SUPABASE ERROR] Status: %d, Response: %s", resp.StatusCode, string(errorBody))
+						}
+						
+						if resp != nil {
+							resp.Body.Close()
+						}
+					} else {
+						// Fallback local memory
+						kvStore.Set("cache:direct:"+compID+":"+hashStr, pBody, 24*time.Hour)
+						semanticMu.Lock()
+						semanticStore = append(semanticStore, SemanticEntry{
+							CompanyID: compID,
+							Embedding: emb,
