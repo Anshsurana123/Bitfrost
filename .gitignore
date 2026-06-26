@@ -1,0 +1,35 @@
+# Monorepo root gitignore
+# Dependency folders
+node_modules/
+**/node_modules/
+.pnp/
+.pnp.*
+
+# Build outputs
+.next/
+**/.next/
+out/
+build/
+dist/
+*.exe
+**/*.exe
+
+# Local environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+**/.env
+**/.env.local
+**/.env.*
+
+# IDEs and OS files
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
