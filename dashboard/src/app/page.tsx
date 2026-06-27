@@ -77,7 +77,7 @@ export default function Dashboard() {
 
     const startTime = Date.now();
     try {
-      const res = await fetch(`${proxyUrl}/v1beta/models/gemini-2.0-flash:generateContent`, {
+      const res = await fetch(`${proxyUrl}/v1beta/models/gemini-3.5-flash:generateContent`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -513,7 +513,7 @@ export default function Dashboard() {
                 <div>
                   <label className="block text-[10px] text-gray-400 mb-2 uppercase tracking-widest font-bold">Target Proxy Endpoint</label>
                   <div className="bg-lumivelle-bg border border-lumivelle-border text-xs text-gray-300 p-3 rounded font-mono select-all">
-                    POST {proxyUrl}/v1beta/models/gemini-2.0-flash:generateContent
+                    POST {proxyUrl}/v1beta/models/gemini-3.5-flash:generateContent
                   </div>
                 </div>
 
