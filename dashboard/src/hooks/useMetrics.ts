@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { supabase } from '@/lib/supabase';
 
 export type MetricData = {
   timestamp: string;
@@ -27,6 +28,25 @@ export function useMetrics() {
   const [mcpLogs, setMcpLogs] = useState<MCPLog[]>([]);
 
   useEffect(() => {
+    // Fetch initial metrics from Supabase to prevent 0-flicker on load
+    supabase.from('bifrost_metrics')
+      .select('request_count, cache_hits, blocked_attacks, total_savings')
+      .eq('id', 'global')
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) {
+          const initialMetric = {
+            timestamp: new Date().toLocaleTimeString(),
+            latency: 0,
+            savings: data.total_savings,
+            request_count: data.request_count,
+            cache_hits: data.cache_hits,
+            blocked_attacks: data.blocked_attacks
+          };
+          setMetrics([initialMetric]);
+        }
+      });
+
     // In production, this points to wss://bifrost-proxy/ws/metrics
     const httpUrl = process.env.NEXT_PUBLIC_PROXY_URL || 'http://localhost:8080';
     const wsUrl = httpUrl.replace(/^http/, 'ws') + '/ws/metrics';

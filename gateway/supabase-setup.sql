@@ -84,6 +84,30 @@ AS $$
 $$;
 
 -- ============================================
+-- 6. Create the Global Metrics Persistence Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS bifrost_metrics (
+  id TEXT PRIMARY KEY,
+  request_count BIGINT DEFAULT 0,
+  cache_hits BIGINT DEFAULT 0,
+  blocked_attacks BIGINT DEFAULT 0,
+  total_savings DOUBLE PRECISION DEFAULT 0.0,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+-- Enable Row Level Security for metrics read access
+ALTER TABLE bifrost_metrics ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Allow public read access to metrics" ON bifrost_metrics;
+CREATE POLICY "Allow public read access to metrics" ON bifrost_metrics
+  FOR SELECT USING (true);
+
+-- Seed default global metrics row if not exists
+INSERT INTO bifrost_metrics (id, request_count, cache_hits, blocked_attacks, total_savings)
+VALUES ('global', 0, 0, 0, 0.0)
+ON CONFLICT (id) DO NOTHING;
+
+-- ============================================
 -- ✅ Setup Complete!
 -- You can now deploy the backend and dashboard.
 -- ============================================

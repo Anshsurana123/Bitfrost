@@ -179,6 +179,7 @@ func (h *WSHub) broadcast(message []byte) {
 }
 
 var wsHub = &WSHub{clients: make(map[*websocket.Conn]bool)}
+var globalProxy *BifrostProxy
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -201,6 +202,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 func startBroadcastLoop() {
 	ticker := time.NewTicker(1 * time.Second)
+	saveCounter := 0
 	for range ticker.C {
 		metrics.mu.RLock()
 		payload := map[string]interface{}{
@@ -218,6 +220,14 @@ func startBroadcastLoop() {
 
 		msg, _ := json.Marshal(payload)
 		wsHub.broadcast(msg)
+
+		saveCounter++
+		if saveCounter >= 5 {
+			saveCounter = 0
+			if globalProxy != nil {
+				go globalProxy.saveGlobalMetrics()
+			}
+		}
 	}
 }
 
@@ -452,6 +462,9 @@ func main() {
 		ollamaAPIKey:   os.Getenv("OLLAMA_API_KEY"),
 		circuitBreaker: &CircuitBreaker{},
 	}
+
+	globalProxy = proxy
+	proxy.loadGlobalMetrics()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/metrics", wsHandler)
@@ -1296,5 +1309,73 @@ func (p *BifrostProxy) auditRequest(body []byte, deviceID string) {
 		metrics.mu.Lock()
 		metrics.BlockedAttacks++
 		metrics.mu.Unlock()
+	}
+}
+
+func (p *BifrostProxy) loadGlobalMetrics() {
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseUrl == "" || supabaseKey == "" {
+		return
+	}
+	urlStr := fmt.Sprintf("%s/rest/v1/bifrost_metrics?id=eq.global", supabaseUrl)
+	req, _ := http.NewRequest("GET", urlStr, nil)
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	
+	resp, err := apiClient.Do(req)
+	if err == nil && resp.StatusCode == 200 {
+		var result []struct {
+			RequestCount   int64   `json:"request_count"`
+			CacheHits      int64   `json:"cache_hits"`
+			BlockedAttacks int64   `json:"blocked_attacks"`
+			TotalSavings   float64 `json:"total_savings"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
+			metrics.mu.Lock()
+			metrics.RequestCount = result[0].RequestCount
+			metrics.CacheHits = result[0].CacheHits
+			metrics.BlockedAttacks = result[0].BlockedAttacks
+			metrics.TotalSavings = result[0].TotalSavings
+			metrics.mu.Unlock()
+			log.Printf("[METRICS] Loaded persistent metrics: Req=%d, Hits=%d, Blocked=%d, Saved=$%.6f", 
+				result[0].RequestCount, result[0].CacheHits, result[0].BlockedAttacks, result[0].TotalSavings)
+		}
+		resp.Body.Close()
+	}
+}
+
+func (p *BifrostProxy) saveGlobalMetrics() {
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseUrl == "" || supabaseKey == "" {
+		return
+	}
+	
+	metrics.mu.RLock()
+	reqCount := metrics.RequestCount
+	cacheHits := metrics.CacheHits
+	blocked := metrics.BlockedAttacks
+	savings := metrics.TotalSavings
+	metrics.mu.RUnlock()
+	
+	urlStr := fmt.Sprintf("%s/rest/v1/bifrost_metrics?id=eq.global", supabaseUrl)
+	payload := map[string]interface{}{
+		"request_count":   reqCount,
+		"cache_hits":      cacheHits,
+		"blocked_attacks": blocked,
+		"total_savings":   savings,
+		"updated_at":      time.Now().Format(time.RFC3339),
+	}
+	jsonPayload, _ := json.Marshal(payload)
+	
+	req, _ := http.NewRequest("PATCH", urlStr, bytes.NewBuffer(jsonPayload))
+	req.Header.Set("apikey", supabaseKey)
+	req.Header.Set("Authorization", "Bearer "+supabaseKey)
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := apiClient.Do(req)
+	if err == nil && resp != nil {
+		resp.Body.Close()
 	}
 }
