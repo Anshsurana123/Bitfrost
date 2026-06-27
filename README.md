@@ -66,26 +66,27 @@ Clients authenticate using generated virtual keys (`bf-vk-...`).
 * **Seamless Hot Rotation**: Rotate underlying provider keys instantly via the backend API without releasing client updates.
 * **Dual-Layer Coherence**: Key bindings are synchronized instantly in a local, hot-cached in-memory key-value store, backed by Supabase PostgreSQL for persistent durability.
 
-### 🛡️ 2. Zero-Trust Cryptographic Security
+### 🛡️ 2. Zero-Trust Cryptographic Security & Rate Limiting
 Bifröst completely shields upstream APIs from unauthorized clients.
 * **Anti-Replay Attack Protection**: Compares incoming request timestamps (`X-Timestamp`) with server times, rejecting requests outside of a strict 60-second execution window.
 * **HMAC-SHA256 Device Fingerprinting**: Every request must be cryptographically signed by the client. The device signature is calculated via:
   $$\text{Signature} = \text{HMAC-SHA256}(\text{app\_secret}, \text{deviceID} + \text{app\_secret} + \text{timestamp})$$
   The gateway recalculates this using the tenant's secret retrieved from the Key Vault, preventing request tampering.
-* **Dynamic Device Trust Scoring**: Tracks device health scores (starting at 100). Malicious attempts degrade the score. Devices with a score below 50 are quarantined and audited synchronously.
+* **Dynamic Device Trust Scoring & Blacklisting**: Tracks device health scores (starting at 100). Malicious attempts degrade the score. Devices with a score below 50 are quarantined and audited synchronously. Malicious devices are blacklisted for 24 hours, and subsequent requests are immediately blocked.
+* **Enforced Rate Limiting**: Protects model endpoints with a default rate limit of 60 requests per minute per device (enforced via an in-memory TTL fixed window). Quotas can be dynamically increased via MCP requests.
 
 ### 💸 3. Dual-Layer Caching Engine
 Bifröst drastically cuts down your LLM inference pricing ($0.075 to $15.00 per 1M tokens) through an intelligent caching system.
 * **L1 Direct Hash Cache**: Executes a sub-millisecond SHA-256 hash comparison on the exact prompt body string.
 * **L2 Semantic Cache**: Translates prompt semantics using Google's `gemini-embedding-001` and evaluates them using a **Cosine Similarity threshold of $\ge 0.88$**.
   $$\text{Cosine Similarity} = \frac{\mathbf{A} \cdot \mathbf{B}}{\|\mathbf{A}\|_2 \|\mathbf{B}\|_2} = \frac{\sum_{i=1}^{n} A_i B_i}{\sqrt{\sum_{i=1}^{n} A_i^2} \sqrt{\sum_{i=1}^{n} B_i^2}}$$
-* **Tenant Isolation**: Caches are partitioned per tenant/company, ensuring absolute compliance and data privacy between clients.
+* **Tenant Isolation**: Caches are partitioned per tenant/company, ensuring absolute compliance and data privacy between clients. Enabled Row Level Security (RLS) on database tables to guarantee cryptographically isolated cache queries.
 * **Savings Tracking**: Automatically parsing prompt and generation tokens, calculating savings dynamically based on input/output pricing, and outputting to dashboards.
 
 ### 🧠 4. Dynamic LLM Interception & Threat Auditing
 Shields models from malicious direct jailbreaks, prompt injections, and system overrides.
 * **Dynamic Auditing Isolation**: Safe devices (trust score $\ge 50$) trigger asynchronous auditing to maintain ultra-low latency, while suspect devices (trust score $< 50$) undergo strict, synchronous validation.
-* **Ollama Cloud Auditor**: Integrates a secondary model (such as `llama3`) running system audits to identify instruction manipulations, blacklisting malicious client IDs for 24 hours.
+* **Hybrid Auditor (Gemini & Ollama)**: Integrates a secondary threat auditor. If a custom Ollama URL is not specified, it seamlessly falls back to Gemini-powered self-auditing using the existing API key, guaranteeing safety out of the box.
 * **Self-Healing Circuit Breaker**: If the threat auditor experiences temporary downtime, the circuit breaker opens, redirecting client flows without blocking mission-critical services.
 
 ### 🔌 5. Model Context Protocol (MCP) Integration
@@ -95,9 +96,10 @@ Bifröst includes native MCP support to handle dynamic permissions:
 
 ### 📊 6. Real-Time WS Control Plane
 Includes a Next.js control panel and a WebSocket server broadcasting telemetry:
-* Real-time network latency (in microseconds).
-* Aggregated monetary savings in USD.
-* Live security events including fingerprint failures, quarantine statuses, and dynamic model control adjustments.
+* **Real-Time Network Latency**: Network latency (in microseconds) visualised with area charts.
+* **Total Savings**: Aggregated monetary savings in USD.
+* **KPI Telemetry Cards**: Displaying Total Requests, Efficiency (Cache Hit Rate %), and Intrusions Blocked.
+* **Live Security Events**: Fingerprint failures, quarantine statuses, rate limit exceedances, and dynamic model control adjustments.
 
 ---
 
