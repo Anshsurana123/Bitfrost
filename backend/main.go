@@ -131,6 +131,13 @@ func (s *InMemoryStore) DecrBy(key string, decrement int64) error {
 	return nil
 }
 
+func (s *InMemoryStore) Delete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, key)
+}
+
+
 // --- Global Metrics Aggregator ---
 type GlobalMetrics struct {
 	mu             sync.RWMutex
@@ -470,6 +477,7 @@ func main() {
 	mux.HandleFunc("/ws/metrics", wsHandler)
 	mux.HandleFunc("/api/keys/generate", proxy.handleKeyGenerate)
 	mux.HandleFunc("/api/keys/rotate", proxy.handleKeyRotate)
+	mux.HandleFunc("/api/keys/revoke", proxy.handleKeyRevoke)
 	mux.HandleFunc("/api/settings/cache", proxy.handleSettings)
 	mux.HandleFunc("/mcp", proxy.handleMCP)
 	mux.HandleFunc("/", proxy.ServeHTTP)
@@ -618,6 +626,63 @@ func (p *BifrostProxy) handleKeyRotate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"rotated"}`))
+}
+
+func (p *BifrostProxy) handleKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		VirtualKey string `json:"virtual_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	if req.VirtualKey == "" {
+		http.Error(w, `{"error":"virtual_key is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Delete from in-memory store
+	p.kvStore.Delete("key_map:" + req.VirtualKey)
+	p.kvStore.Delete("key_company:" + req.VirtualKey)
+	p.kvStore.Delete("app_secret:" + req.VirtualKey)
+	log.Printf("[KEY REVOCATION] Virtual key %s revoked", req.VirtualKey[:12]+"...")
+
+	// Delete from Supabase
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+	if supabaseUrl != "" && supabaseKey != "" {
+		urlStr := fmt.Sprintf("%s/rest/v1/bifrost_keys?virtual_key=eq.%s", supabaseUrl, req.VirtualKey)
+		reqObj, _ := http.NewRequest("DELETE", urlStr, nil)
+		reqObj.Header.Set("apikey", supabaseKey)
+		reqObj.Header.Set("Authorization", "Bearer "+supabaseKey)
+
+		resp, err := apiClient.Do(reqObj)
+		if err != nil {
+			log.Printf("[SUPABASE ERROR] Key deletion error: %v", err)
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"revoked"}`))
 }
 
 func (p *BifrostProxy) handleSettings(w http.ResponseWriter, r *http.Request) {

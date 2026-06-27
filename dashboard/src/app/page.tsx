@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useMetrics } from '@/hooks/useMetrics';
-import { Activity, Shield, ShieldAlert, Zap, ServerCog, CheckCircle, XCircle, KeyRound, Copy, Lock, User, LogOut, BrainCircuit, RefreshCw, Play, Terminal } from 'lucide-react';
+import { Activity, Shield, ShieldAlert, Zap, ServerCog, CheckCircle, XCircle, KeyRound, Copy, Lock, User, LogOut, BrainCircuit, RefreshCw, Play, Terminal, Trash2 } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { supabase } from '@/lib/supabase';
 
@@ -248,6 +248,31 @@ export default function Dashboard() {
     }
   };
 
+  const revokeKey = async (virtualKey: string) => {
+    if (!confirm('Are you sure you want to revoke and permanently delete this virtual key?')) return;
+    try {
+      const { error } = await supabase.from('bifrost_keys')
+        .delete()
+        .eq('virtual_key', virtualKey);
+      
+      if (error) throw error;
+      
+      const proxyUrl = process.env.NEXT_PUBLIC_PROXY_URL || 'http://localhost:8080';
+      fetch(`${proxyUrl}/api/keys/revoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ virtual_key: virtualKey })
+      }).catch(err => console.error("Error evicting key from proxy memory:", err));
+
+      if (session?.user?.id) {
+        supabase.from('bifrost_keys').select('virtual_key, app_secret, created_at').eq('company_id', session.user.id)
+          .then(({ data }) => { if (data) setSavedKeys(data); });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const toggleCache = async () => {
     if (!session?.user?.id) return;
     const newState = !cacheEnabled;
@@ -452,6 +477,13 @@ export default function Dashboard() {
                              className={`transition-colors ${rotatingKey === k.virtual_key ? 'text-lumivelle-accent' : 'text-gray-500 hover:text-lumivelle-accent'}`}
                            >
                              <RefreshCw className="w-3 h-3" />
+                           </button>
+                           <button 
+                             onClick={() => revokeKey(k.virtual_key)}
+                             title="Delete/Revoke Key"
+                             className="text-gray-500 hover:text-red-500 transition-colors"
+                           >
+                             <Trash2 className="w-3 h-3" />
                            </button>
                          </div>
                        </div>
