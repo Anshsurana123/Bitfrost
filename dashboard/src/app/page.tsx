@@ -149,13 +149,13 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (session?.user?.id && activeTab === 'VAULT') {
+    if (session?.user?.id) {
       supabase.from('bifrost_keys').select('virtual_key, app_secret, created_at').eq('company_id', session.user.id)
         .then(({ data }) => {
           if (data) setSavedKeys(data);
         });
     }
-  }, [session, activeTab]);
+  }, [session]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
