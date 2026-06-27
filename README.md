@@ -42,13 +42,10 @@ flowchart TD
     
     CacheCheck -->|L1 Direct Hash Match| Hit[Return Cached Response]
     CacheCheck -->|L2 Semantic Cosine Match| Hit
-    
-    CacheCheck -->|Cache Miss & Trust Score < 50| SyncAudit[Synchronous LLM Auditor]
-    CacheCheck -->|Cache Miss & Trust Score >= 50| AsyncAudit[Asynchronous LLM Auditor]
+    CacheCheck -->|Cache Miss| SyncAudit[Synchronous LLM Auditor]
     
     SyncAudit -->|Adversarial Prompt Detected| Quarantine[403 Blocked & Blacklist Client]
     SyncAudit -->|Safe Prompt| Upstream[Upstream AI API: Gemini]
-    AsyncAudit -->|Background Llama-3 Audit| Upstream
     
     Upstream -->|Response| SaveCache[Store in L1 Hash & L2 Semantic Vector DB]
     SaveCache --> ReturnClient[Return Response to Client]
@@ -72,7 +69,7 @@ Bifröst completely shields upstream APIs from unauthorized clients.
 * **HMAC-SHA256 Device Fingerprinting**: Every request must be cryptographically signed by the client. The device signature is calculated via:
   $$\text{Signature} = \text{HMAC-SHA256}(\text{app\_secret}, \text{deviceID} + \text{app\_secret} + \text{timestamp})$$
   The gateway recalculates this using the tenant's secret retrieved from the Key Vault, preventing request tampering.
-* **Dynamic Device Trust Scoring & Blacklisting**: Tracks device health scores (starting at 100). Malicious attempts degrade the score. Devices with a score below 50 are quarantined and audited synchronously. Malicious devices are blacklisted for 24 hours, and subsequent requests are immediately blocked.
+* **Dynamic Device Trust Scoring & Blacklisting**: Tracks device health scores (starting at 100). Malicious attempts degrade the score. Malicious devices are blacklisted for 24 hours, and subsequent requests are immediately blocked.
 * **Enforced Rate Limiting**: Protects model endpoints with a default rate limit of 60 requests per minute per device (enforced via an in-memory TTL fixed window). Quotas can be dynamically increased via MCP requests.
 
 ### 💸 3. Dual-Layer Caching Engine
@@ -85,7 +82,7 @@ Bifröst drastically cuts down your LLM inference pricing ($0.075 to $15.00 per 
 
 ### 🧠 4. Dynamic LLM Interception & Threat Auditing
 Shields models from malicious direct jailbreaks, prompt injections, and system overrides.
-* **Dynamic Auditing Isolation**: Safe devices (trust score $\ge 50$) trigger asynchronous auditing to maintain ultra-low latency, while suspect devices (trust score $< 50$) undergo strict, synchronous validation.
+* **100% Synchronous Auditing**: To guarantee zero-trust protection, all cache misses go through a synchronous safety audit to block adversarial injections before they ever reach the provider models.
 * **Hybrid Auditor (Gemini & Ollama)**: Integrates a secondary threat auditor. If a custom Ollama URL is not specified, it seamlessly falls back to Gemini-powered self-auditing using the existing API key, guaranteeing safety out of the box.
 * **Self-Healing Circuit Breaker**: If the threat auditor experiences temporary downtime, the circuit breaker opens, redirecting client flows without blocking mission-critical services.
 
@@ -99,7 +96,9 @@ Includes a Next.js control panel and a WebSocket server broadcasting telemetry:
 * **Real-Time Network Latency**: Network latency (in microseconds) visualised with area charts.
 * **Total Savings**: Aggregated monetary savings in USD.
 * **KPI Telemetry Cards**: Displaying Total Requests, Efficiency (Cache Hit Rate %), and Intrusions Blocked.
-* **Live Security Events**: Fingerprint failures, quarantine statuses, rate limit exceedances, and dynamic model control adjustments.
+* **Persistent Metrics DB Backup**: Telemetry is backed up persistently in the Supabase table `bifrost_metrics` and loaded on proxy startup and dashboard mount to prevent resets and 0-flicker on reload.
+* **Playground Blacklist Visual Alerts**: Interactive warning banner on the playground and session ID rotation/reset button to test the security lifecycle.
+* **Key Vault Deletion**: Support for revoking and deleting virtual keys instantly with active cache eviction.
 
 ---
 
