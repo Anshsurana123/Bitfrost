@@ -29,12 +29,23 @@ CREATE TABLE IF NOT EXISTS bifrost_keys (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 
--- 4. Enable Row Level Security for key isolation
---    This ensures tenants can only see their own keys from the dashboard
+-- 4. Enable Row Level Security for key and cache isolation
+--    This ensures tenants can only access their own keys and cache from the dashboard
 ALTER TABLE bifrost_keys ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Users can view their own keys" ON bifrost_keys;
 CREATE POLICY "Users can view their own keys" ON bifrost_keys
   FOR SELECT USING (auth.uid() = company_id);
+
+ALTER TABLE bifrost_cache ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view their own cache entries" ON bifrost_cache;
+CREATE POLICY "Users can view their own cache entries" ON bifrost_cache
+  FOR SELECT USING (auth.uid() = company_id);
+
+DROP POLICY IF EXISTS "Users can insert their own cache entries" ON bifrost_cache;
+CREATE POLICY "Users can insert their own cache entries" ON bifrost_cache
+  FOR INSERT WITH CHECK (auth.uid() = company_id);
 
 -- 5. Create the Semantic Similarity Search function
 --    Used by the Go backend to find semantically similar cached prompts

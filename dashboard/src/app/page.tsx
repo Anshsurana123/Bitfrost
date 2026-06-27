@@ -23,6 +23,10 @@ export default function Dashboard() {
 
   const currentLatency = metrics.length ? metrics[metrics.length - 1].latency : 0;
   const currentSavings = metrics.length ? metrics[metrics.length - 1].savings : 0;
+  const currentRequests = metrics.length ? (metrics[metrics.length - 1] as any).request_count || 0 : 0;
+  const currentCacheHits = metrics.length ? (metrics[metrics.length - 1] as any).cache_hits || 0 : 0;
+  const currentBlocked = metrics.length ? (metrics[metrics.length - 1] as any).blocked_attacks || 0 : 0;
+  const hitRate = currentRequests > 0 ? (currentCacheHits / currentRequests) * 100 : 0;
 
   // Key Vault State
   const [realKey, setRealKey] = useState('');
@@ -368,6 +372,33 @@ export default function Dashboard() {
         </section>
       ) : (
         <>
+          {/* KPI CARDS */}
+          <section className="mb-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="border border-lumivelle-border bg-lumivelle-muted/10 p-5 rounded flex items-center justify-between hover:scale-[1.02] transition-transform duration-300">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Total Traffic</p>
+                <h3 className="text-2xl font-bold text-lumivelle-accent">{currentRequests} <span className="text-xs text-gray-500 font-normal">reqs</span></h3>
+              </div>
+              <Activity className="w-8 h-8 text-lumivelle-accent opacity-60" />
+            </div>
+
+            <div className="border border-lumivelle-border bg-lumivelle-muted/10 p-5 rounded flex items-center justify-between hover:scale-[1.02] transition-transform duration-300">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Efficiency (Cache Hit Rate)</p>
+                <h3 className="text-2xl font-bold text-lumivelle-accent">{hitRate.toFixed(1)}%</h3>
+              </div>
+              <BrainCircuit className="w-8 h-8 text-lumivelle-accent opacity-60" />
+            </div>
+
+            <div className="border border-lumivelle-border bg-lumivelle-muted/10 p-5 rounded flex items-center justify-between hover:scale-[1.02] transition-transform duration-300">
+              <div>
+                <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Intrusions Blocked</p>
+                <h3 className="text-2xl font-bold text-red-500">{currentBlocked} <span className="text-xs text-gray-500 font-normal">threats</span></h3>
+              </div>
+              <ShieldAlert className="w-8 h-8 text-red-500 opacity-60 animate-pulse" />
+            </div>
+          </section>
+
           {/* THE PULSE & SAVINGS */}
           <section className="mb-12 grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="col-span-1 lg:col-span-2 border border-lumivelle-border bg-lumivelle-bg p-6 rounded shadow-[0_0_15px_rgba(212,175,55,0.05)] h-64 flex flex-col">
