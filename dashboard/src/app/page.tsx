@@ -398,3 +398,78 @@ export default function Dashboard() {
             </div>
 
             <div className={`border border-lumivelle-border p-6 rounded flex flex-col justify-center relative overflow-hidden h-64 transition-colors ${cacheEnabled ? 'bg-lumivelle-bg' : 'bg-lumivelle-bg/30 grayscale opacity-50'}`}>
+              <div className="absolute top-0 right-0 p-4 opacity-10">
+                <Zap className="w-32 h-32 text-lumivelle-accent" />
+              </div>
+              <h2 className="text-sm text-gray-500 mb-2 uppercase tracking-widest relative z-10">Total Savings</h2>
+              <div className="text-5xl font-light text-lumivelle-accent tracking-tighter relative z-10">
+                ${currentSavings.toFixed(6)}
+              </div>
+              <div className="mt-4 flex items-center gap-2 text-xs relative z-10">
+                {cacheEnabled ? (
+                   <span className="text-green-500 flex items-center gap-1 animate-pulse"><Zap className="w-3 h-3"/> Semantic Cache Active</span>
+                ) : (
+                   <span className="text-gray-500 flex items-center gap-1"><XCircle className="w-3 h-3"/> Caching Disabled</span>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            {/* THE SENTRY */}
+            <section className="border border-lumivelle-border bg-lumivelle-muted/10 p-6 rounded min-h-64">
+              <h2 className="text-sm text-gray-500 mb-6 uppercase tracking-widest flex items-center gap-2">
+                <Shield className="w-4 h-4 text-lumivelle-accent" />
+                The Sentry (Zero-Trust Feed)
+              </h2>
+              <div className="space-y-3">
+                {fingerprints.length === 0 && <div className="text-gray-600 text-sm italic">Awaiting telemetry...</div>}
+                {fingerprints.map(fp => (
+                  <div key={fp.id} className="flex items-center justify-between p-3 border-b border-lumivelle-border/50 bg-lumivelle-bg/50 rounded">
+                    <div className="flex items-center gap-3">
+                      {fp.status === 'VALID' ? <CheckCircle className="w-4 h-4 text-green-500" /> : 
+                      fp.status === 'QUARANTINE' ? <ShieldAlert className="w-4 h-4 text-yellow-500" /> : 
+                      <XCircle className="w-4 h-4 text-red-500" />}
+                      <span className="text-sm">{fp.fingerprint}</span>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <span className={`text-xs tracking-widest font-bold ${fp.status === 'VALID' ? 'text-green-500' : fp.status === 'QUARANTINE' ? 'text-yellow-500' : 'text-red-500'}`}>
+                        {fp.status}
+                      </span>
+                      <span className="text-[10px] text-gray-600">{fp.time}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* THE NEGOTIATOR */}
+            <section className="border border-lumivelle-border bg-lumivelle-muted/10 p-6 rounded min-h-64">
+              <h2 className="text-sm text-gray-500 mb-6 uppercase tracking-widest flex items-center gap-2">
+                <ServerCog className="w-4 h-4 text-lumivelle-accent" />
+                The Negotiator (MCP Log)
+              </h2>
+              <div className="space-y-3">
+                {mcpLogs.length === 0 && <div className="text-gray-600 text-sm italic">Awaiting agent requests...</div>}
+                {mcpLogs.map(log => (
+                  <div key={log.id} className="p-3 border border-lumivelle-border/50 bg-lumivelle-bg/50 rounded flex flex-col gap-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-lumivelle-accent">Device {log.device}</span>
+                      <span className="text-[10px] text-gray-500">{log.time}</span>
+                    </div>
+                    <p className="text-xs text-gray-300">Action: {log.action}</p>
+                    <div className="flex justify-end">
+                      <span className={`text-xs px-2 py-1 rounded tracking-widest ${log.status === 'APPROVED' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                        {log.status}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        </>
+      )}
+    </main>
+  );
+}
