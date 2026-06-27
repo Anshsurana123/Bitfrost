@@ -342,11 +342,6 @@ func main() {
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
-				// Inject CORS headers on the proxy response to prevent browser blocks on cache misses
-				resp.Header.Set("Access-Control-Allow-Origin", "*")
-				resp.Header.Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-				resp.Header.Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, X-Device-ID, X-Timestamp, X-Bifrost-Key, X-Device-Fingerprint")
-
 				if resp.StatusCode != http.StatusOK {
 					return nil
 				}
