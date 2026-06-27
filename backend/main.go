@@ -729,10 +729,10 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Synchronously audit all requests to intercept threat injections before they reach the LLM
+	// Run threat audit synchronously on all requests to block malicious injections instantly
 	if !p.circuitBreaker.IsOpen() {
-		if blocked := p.auditRequestSync(bodyBytes, deviceID); blocked {
-			http.Error(w, `{"error": "Blocked by Sovereign Interceptor: Malicious Prompt Detected"}`, http.StatusForbidden)
+		if blocked := p.auditRequestSync(bodyBytes, r.Header.Get("X-Device-ID")); blocked {
+			http.Error(w, `{"error": "Blocked by Sovereign Interceptor"}`, http.StatusForbidden)
 			return
 		}
 	}
