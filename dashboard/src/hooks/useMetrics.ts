@@ -57,7 +57,11 @@ export function useMetrics() {
         const data = JSON.parse(event.data);
         
         if (data.type === 'METRIC') {
-          setMetrics(prev => [...prev.slice(-19), data.payload]);
+          const timeStr = typeof data.payload.timestamp === 'number'
+            ? new Date(data.payload.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+            : data.payload.timestamp;
+          const payload = { ...data.payload, timestamp: timeStr };
+          setMetrics(prev => [...prev.slice(-19), payload]);
         } else if (data.type === 'FINGERPRINT') {
           setFingerprints(prev => [data.payload, ...prev].slice(0, 5));
         } else if (data.type === 'MCP') {

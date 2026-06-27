@@ -215,7 +215,7 @@ func startBroadcastLoop() {
 		payload := map[string]interface{}{
 			"type": "METRIC",
 			"payload": map[string]interface{}{
-				"timestamp":       time.Now().Format("15:04:05"),
+				"timestamp":       time.Now().Unix(),
 				"latency":         metrics.CurrentLatency,
 				"savings":         metrics.TotalSavings,
 				"request_count":   metrics.RequestCount,
