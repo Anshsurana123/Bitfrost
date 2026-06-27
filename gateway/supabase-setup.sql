@@ -45,6 +45,10 @@ DROP POLICY IF EXISTS "Users can update their own keys" ON bifrost_keys;
 CREATE POLICY "Users can update their own keys" ON bifrost_keys
   FOR UPDATE USING (auth.uid() = company_id);
 
+DROP POLICY IF EXISTS "Users can delete their own keys" ON bifrost_keys;
+CREATE POLICY "Users can delete their own keys" ON bifrost_keys
+  FOR DELETE USING (auth.uid() = company_id);
+
 ALTER TABLE bifrost_cache ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Users can view their own cache entries" ON bifrost_cache;
