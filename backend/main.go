@@ -657,7 +657,7 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		metrics.mu.Unlock()
 	}()
 
-	valid, isQuarantine := p.validateIdentity(r)
+	valid, _ := p.validateIdentity(r)
 	if !valid {
 		http.Error(w, `{"error": "Forbidden: Identity Fingerprint Mismatch, Replay Attack, or Device Blacklisted"}`, http.StatusForbidden)
 		return
@@ -729,14 +729,11 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if isQuarantine {
-		if blocked := p.auditRequestSync(bodyBytes, r.Header.Get("X-Device-ID")); blocked {
-			http.Error(w, `{"error": "Blocked by Sovereign Interceptor"}`, http.StatusForbidden)
+	// Synchronously audit all requests to intercept threat injections before they reach the LLM
+	if !p.circuitBreaker.IsOpen() {
+		if blocked := p.auditRequestSync(bodyBytes, deviceID); blocked {
+			http.Error(w, `{"error": "Blocked by Sovereign Interceptor: Malicious Prompt Detected"}`, http.StatusForbidden)
 			return
-		}
-	} else {
-		if !p.circuitBreaker.IsOpen() && time.Now().UnixNano()%10 == 0 {
-			go p.auditRequest(bodyBytes, r.Header.Get("X-Device-ID"))
 		}
 	}
 
