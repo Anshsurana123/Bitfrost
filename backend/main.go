@@ -342,6 +342,12 @@ func main() {
 				}
 			},
 			ModifyResponse: func(resp *http.Response) error {
+				// Strip upstream CORS headers to prevent duplicate values when combined with our corsHandler
+				resp.Header.Del("Access-Control-Allow-Origin")
+				resp.Header.Del("Access-Control-Allow-Methods")
+				resp.Header.Del("Access-Control-Allow-Headers")
+				resp.Header.Del("Access-Control-Expose-Headers")
+
 				if resp.StatusCode != http.StatusOK {
 					return nil
 				}
