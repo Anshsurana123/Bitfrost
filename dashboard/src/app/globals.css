@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --color-lumivelle-bg: #050505;
+  --color-lumivelle-accent: #D4AF37;
+  --color-lumivelle-text: #EDEDED;
+  --color-lumivelle-muted: #1A1A1A;
+  --color-lumivelle-border: #332B1A;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-lumivelle-bg);
+    color: var(--color-lumivelle-text);
+  }
+}
