@@ -349,6 +349,12 @@ type MCPRequest struct {
 	Reason string `json:"reason"`
 }
 
+func handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"healthy"}`))
+}
+
 // --- Initialization ---
 
 func main() {
@@ -532,6 +538,7 @@ func main() {
 	proxy.loadGlobalMetrics()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", handleHealth)
 	mux.HandleFunc("/ws/metrics", wsHandler)
 	mux.HandleFunc("/api/keys/generate", proxy.handleKeyGenerate)
 	mux.HandleFunc("/api/keys/rotate", proxy.handleKeyRotate)
