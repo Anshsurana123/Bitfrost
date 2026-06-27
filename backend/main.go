@@ -324,9 +324,9 @@ func main() {
 								}
 								if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
 									realKey = result[0].RealKey
-									kvStore.Set("key_map:"+virtualKey, result[0].RealKey, 0)
-									kvStore.Set("key_company:"+virtualKey, result[0].CompanyID, 0)
-									kvStore.Set("app_secret:"+virtualKey, result[0].AppSecret, 0)
+									kvStore.Set("key_map:"+virtualKey, result[0].RealKey, 5 * time.Minute)
+									kvStore.Set("key_company:"+virtualKey, result[0].CompanyID, 5 * time.Minute)
+									kvStore.Set("app_secret:"+virtualKey, result[0].AppSecret, 5 * time.Minute)
 								}
 								resp.Body.Close()
 							}
@@ -506,9 +506,9 @@ func (p *BifrostProxy) handleKeyGenerate(w http.ResponseWriter, r *http.Request)
 	appSecret := "sec-" + hex.EncodeToString(randBytes)
 
 	// Bind key to specific company in memory
-	p.kvStore.Set("key_map:"+virtualKey, req.RealKey, 0)
-	p.kvStore.Set("key_company:"+virtualKey, req.CompanyID, 0)
-	p.kvStore.Set("app_secret:"+virtualKey, appSecret, 0)
+	p.kvStore.Set("key_map:"+virtualKey, req.RealKey, 5 * time.Minute)
+	p.kvStore.Set("key_company:"+virtualKey, req.CompanyID, 5 * time.Minute)
+	p.kvStore.Set("app_secret:"+virtualKey, appSecret, 5 * time.Minute)
 
 	supabaseUrl := os.Getenv("SUPABASE_URL")
 	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -570,7 +570,7 @@ func (p *BifrostProxy) handleKeyRotate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update in-memory store
-	p.kvStore.Set("key_map:"+req.VirtualKey, req.NewRealKey, 0)
+	p.kvStore.Set("key_map:"+req.VirtualKey, req.NewRealKey, 5 * time.Minute)
 	log.Printf("[KEY ROTATION] Virtual key %s rotated to new provider key", req.VirtualKey[:12]+"...")
 
 	// Update in Supabase
@@ -960,9 +960,9 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 				}
 				if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
 					appSecret = result[0].AppSecret
-					p.kvStore.Set("key_map:"+bifrostKey, result[0].RealKey, 0)
-					p.kvStore.Set("key_company:"+bifrostKey, result[0].CompanyID, 0)
-					p.kvStore.Set("app_secret:"+bifrostKey, result[0].AppSecret, 0)
+					p.kvStore.Set("key_map:"+bifrostKey, result[0].RealKey, 5 * time.Minute)
+					p.kvStore.Set("key_company:"+bifrostKey, result[0].CompanyID, 5 * time.Minute)
+					p.kvStore.Set("app_secret:"+bifrostKey, result[0].AppSecret, 5 * time.Minute)
 				}
 				resp.Body.Close()
 			}

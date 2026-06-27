@@ -185,21 +185,28 @@ export default function Dashboard() {
     
     setIsGenerating(true);
     try {
-      const res = await fetch(`${proxyUrl}/api/keys/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          real_key: realKey,
-          company_id: session.user.id // B2B Multi-Tenant Isolation
-        })
+      // Securely generate random bytes in the browser for virtual_key and app_secret
+      const randBytes = crypto.getRandomValues(new Uint8Array(16));
+      const virtualKey = "bf-vk-" + Array.from(randBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+      const randSecretBytes = crypto.getRandomValues(new Uint8Array(16));
+      const appSecret = "sec-" + Array.from(randSecretBytes).map(b => b.toString(16).padStart(2, '0')).join('');
+
+      const { error } = await supabase.from('bifrost_keys').insert({
+        virtual_key: virtualKey,
+        company_id: session.user.id,
+        real_key: realKey,
+        app_secret: appSecret
       });
-      const data = await res.json();
-      setGeneratedKey(data);
+      
+      if (error) throw error;
+      
+      setGeneratedKey({ virtual_key: virtualKey, app_secret: appSecret });
       setRealKey('');
     } catch (err) {
       console.error(err);
     }
     setIsGenerating(false);
+    
     // Refresh saved keys list
     if (session?.user?.id) {
       supabase.from('bifrost_keys').select('virtual_key, app_secret, created_at').eq('company_id', session.user.id)
@@ -210,13 +217,20 @@ export default function Dashboard() {
   const rotateKey = async (virtualKey: string) => {
     if (!newRealKey) return;
     try {
-      await fetch(`${proxyUrl}/api/keys/rotate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ virtual_key: virtualKey, new_real_key: newRealKey })
-      });
+      const { error } = await supabase.from('bifrost_keys')
+        .update({ real_key: newRealKey })
+        .eq('virtual_key', virtualKey);
+      
+      if (error) throw error;
+      
       setRotatingKey(null);
       setNewRealKey('');
+      
+      // Refresh saved keys list
+      if (session?.user?.id) {
+        supabase.from('bifrost_keys').select('virtual_key, app_secret, created_at').eq('company_id', session.user.id)
+          .then(({ data }) => { if (data) setSavedKeys(data); });
+      }
     } catch (err) {
       console.error(err);
     }
