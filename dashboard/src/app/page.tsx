@@ -35,6 +35,14 @@ export default function Dashboard() {
   const [responseData, setResponseData] = useState<any>(null);
   const [responseHeaders, setResponseHeaders] = useState<any>(null);
   const [latencyResult, setLatencyResult] = useState<number | null>(null);
+  const [sandboxDeviceId, setSandboxDeviceId] = useState('sandbox-device-001');
+  const [isDeviceBlocked, setIsDeviceBlocked] = useState(false);
+
+  const resetDeviceSession = () => {
+    const rand = Math.floor(1000 + Math.random() * 9000);
+    setSandboxDeviceId(`sandbox-device-${rand}`);
+    setIsDeviceBlocked(false);
+  };
 
   // Native Web Crypto HMAC SHA-256 generator
   const calculateHMAC = async (secret: string, message: string) => {
@@ -62,7 +70,7 @@ export default function Dashboard() {
     setResponseHeaders(null);
     setLatencyResult(null);
 
-    const deviceID = "sandbox-device-001";
+    const deviceID = sandboxDeviceId;
     const timestamp = Math.floor(Date.now() / 1000).toString();
     const secret = activeKey.app_secret;
     const virtualKey = activeKey.virtual_key;
@@ -94,6 +102,10 @@ export default function Dashboard() {
       const endTime = Date.now();
       setLatencyResult(endTime - startTime);
       
+      if (res.status === 403) {
+        setIsDeviceBlocked(true);
+      }
+
       const text = await res.text();
       try {
         setResponseData(JSON.parse(text));
@@ -495,6 +507,24 @@ export default function Dashboard() {
               </div>
             ) : (
               <div className="flex flex-col gap-6">
+                {isDeviceBlocked && (
+                  <div className="border border-red-500/30 bg-red-500/10 p-4 rounded text-xs font-mono flex flex-col gap-2 relative overflow-hidden">
+                    <div className="flex items-center gap-2 font-bold text-red-500 uppercase tracking-wider">
+                      <ShieldAlert className="w-5 h-5 animate-pulse" />
+                      Device Blocked (Malicious Prompt Detected)
+                    </div>
+                    <p className="text-gray-400 text-[11px] leading-relaxed">
+                      This sandbox device session has been quarantined and blocked because a malicious prompt attack was detected by the safety filter. To test the playground again, click the button below to reset the device session.
+                    </p>
+                    <button 
+                      onClick={resetDeviceSession}
+                      className="mt-1 self-start px-3 py-1.5 bg-red-500 hover:bg-red-600 text-lumivelle-bg font-bold rounded transition-colors uppercase tracking-widest text-[10px] hover:scale-[1.02]"
+                    >
+                      Reset Device Session
+                    </button>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-[10px] text-gray-400 mb-2 uppercase tracking-widest font-bold">Select Active Credential</label>
                   <select 
@@ -508,6 +538,24 @@ export default function Dashboard() {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-[10px] text-gray-400 uppercase tracking-widest font-bold">Device Session ID</label>
+                    <button 
+                      onClick={resetDeviceSession}
+                      className="text-lumivelle-accent hover:underline text-[9px] uppercase tracking-wider font-mono"
+                    >
+                      Rotate Session
+                    </button>
+                  </div>
+                  <div className="bg-lumivelle-bg border border-lumivelle-border text-xs text-gray-400 p-3 rounded font-mono flex justify-between items-center">
+                    <span>{sandboxDeviceId}</span>
+                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded font-mono ${isDeviceBlocked ? 'bg-red-500/15 text-red-500 animate-pulse' : 'bg-green-500/10 text-green-500'}`}>
+                      {isDeviceBlocked ? 'BLOCKED' : 'ACTIVE'}
+                    </span>
+                  </div>
                 </div>
 
                 <div>
