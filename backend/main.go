@@ -548,3 +548,153 @@ func (p *BifrostProxy) handleKeyRotate(w http.ResponseWriter, r *http.Request) {
 
 	if supabaseUrl != "" && supabaseKey != "" {
 		urlStr := fmt.Sprintf("%s/rest/v1/bifrost_keys?virtual_key=eq.%s", supabaseUrl, req.VirtualKey)
+		payload := map[string]interface{}{
+			"real_key": req.NewRealKey,
+		}
+		jsonPayload, _ := json.Marshal(payload)
+
+		reqObj, _ := http.NewRequest("PATCH", urlStr, bytes.NewBuffer(jsonPayload))
+		reqObj.Header.Set("apikey", supabaseKey)
+		reqObj.Header.Set("Authorization", "Bearer "+supabaseKey)
+		reqObj.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(reqObj)
+		if err != nil {
+			log.Printf("[SUPABASE ERROR] Failed to rotate key: %v", err)
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"rotated"}`))
+}
+
+func (p *BifrostProxy) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		CompanyID    string `json:"company_id"`
+		CacheEnabled bool   `json:"cache_enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
+		return
+	}
+
+	val := "false"
+	if req.CacheEnabled {
+		val = "true"
+	}
+	p.kvStore.Set("cache_enabled:"+req.CompanyID, val, 0)
+
+	log.Printf("[SETTINGS] Company '%s' set Semantic Caching to: %s", req.CompanyID, val)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"updated"}`))
+}
+
+// --- Middleware Chain ---
+
+func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func() {
+		metrics.mu.Lock()
+		metrics.CurrentLatency = time.Since(start).Microseconds()
+		metrics.RequestCount++
+		metrics.mu.Unlock()
+	}()
+
+	valid, isQuarantine := p.validateIdentity(r)
+	if !valid {
+		http.Error(w, `{"error": "Forbidden: Identity Fingerprint Mismatch or Replay Attack"}`, http.StatusForbidden)
+		return
+	}
+
+	// Extract Company ID to pass into context
+	bifrostKey := r.Header.Get("X-Bifrost-Key")
+	companyID, err := p.kvStore.Get("key_company:" + bifrostKey)
+	if err != nil {
+		companyID = "default"
+	}
+
+	if r.ContentLength > MaxBodySize {
+		w.Header().Set("X-Bifrost-Bypass", "true")
+		p.reverseProxy.ServeHTTP(w, r)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, MaxBodySize+1))
+	if err != nil || len(bodyBytes) > MaxBodySize {
+		http.Error(w, `{"error": "Payload too large"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// Semantic Brain Check (Isolated by Company)
+	if p.checkSemanticCache(w, bodyBytes, companyID) {
+		return // Served from semantic cache!
+	}
+
+	if isQuarantine {
+		if blocked := p.auditRequestSync(bodyBytes, r.Header.Get("X-Device-ID")); blocked {
+			http.Error(w, `{"error": "Blocked by Sovereign Interceptor"}`, http.StatusForbidden)
+			return
+		}
+	} else {
+		if !p.circuitBreaker.IsOpen() && time.Now().UnixNano()%10 == 0 {
+			go p.auditRequest(bodyBytes, r.Header.Get("X-Device-ID"))
+		}
+	}
+
+	// Inject body and company into context so ModifyResponse can cache it
+	ctx := context.WithValue(r.Context(), bodyCtxKey, bodyBytes)
+	ctx = context.WithValue(ctx, companyCtxKey, companyID)
+	p.reverseProxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// --- Semantic Brain Logic ---
+
+func getEmbedding(text string) ([]float32, error) {
+	apiKey := os.Getenv("GEMINI_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("GEMINI_API_KEY missing")
+	}
+
+	urlStr := "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key=" + apiKey
+	payload := map[string]interface{}{
+		"model": "models/gemini-embedding-001",
+		"content": map[string]interface{}{
+			"parts": []map[string]interface{}{{"text": text}},
+		},
+	}
+	jsonPayload, _ := json.Marshal(payload)
+
+	req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(jsonPayload))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		errorBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Gemini API Error %d: %s", resp.StatusCode, string(errorBody))
+	}
+
+	var result struct {
+		Embedding struct {
+			Values []float32 `json:"values"`
+		} `json:"embedding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Embedding.Values, nil
+}
+
