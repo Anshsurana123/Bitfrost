@@ -698,3 +698,153 @@ func getEmbedding(text string) ([]float32, error) {
 	return result.Embedding.Values, nil
 }
 
+func cosineSimilarity(a, b []float32) float64 {
+	var dotProduct, normA, normB float64
+	for i := range a {
+		dotProduct += float64(a[i] * b[i])
+		normA += float64(a[i] * a[i])
+		normB += float64(b[i] * b[i])
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, companyID string) bool {
+	// Check if this company has caching disabled
+	cacheEnabled, _ := p.kvStore.Get("cache_enabled:" + companyID)
+	if cacheEnabled == "false" {
+		return false
+	}
+
+	hash := sha256.Sum256(body)
+	hashStr := hex.EncodeToString(hash[:])
+
+	supabaseUrl := os.Getenv("SUPABASE_URL")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+	// L1: Direct Hash via Supabase
+	if supabaseUrl != "" && supabaseKey != "" {
+		urlStr := fmt.Sprintf("%s/rest/v1/bifrost_cache?select=response&company_id=eq.%s&prompt_hash=eq.%s", supabaseUrl, companyID, hashStr)
+		req, _ := http.NewRequest("GET", urlStr, nil)
+		req.Header.Set("apikey", supabaseKey)
+		req.Header.Set("Authorization", "Bearer "+supabaseKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			var result []struct {
+				Response string `json:"response"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && len(result) > 0 {
+				p.registerCacheHit(w, []byte(result[0].Response), "DIRECT")
+				return true
+			}
+		}
+	} else {
+		// Fallback local memory L1
+		cached, err := p.kvStore.GetBytes("cache:direct:" + companyID + ":" + hashStr)
+		if err == nil {
+			p.registerCacheHit(w, cached, "DIRECT")
+			return true
+		}
+	}
+
+	var reqBody struct {
+		Prompt string `json:"prompt"`
+	}
+	json.Unmarshal(body, &reqBody)
+	promptText := reqBody.Prompt
+	if promptText == "" {
+		promptText = string(body) // fallback
+	}
+
+	emb, err := getEmbedding(promptText)
+	if err != nil || len(emb) == 0 {
+		return false
+	}
+
+	// L2: Semantic Match
+	if supabaseUrl != "" && supabaseKey != "" {
+		urlStr := fmt.Sprintf("%s/rest/v1/rpc/match_prompts", supabaseUrl)
+		payload := map[string]interface{}{
+			"query_embedding":   emb,
+			"match_threshold":   SemanticThreshold,
+			"match_count":       1,
+			"target_company_id": companyID,
+		}
+		jsonPayload, _ := json.Marshal(payload)
+		
+		req, _ := http.NewRequest("POST", urlStr, bytes.NewBuffer(jsonPayload))
+		req.Header.Set("apikey", supabaseKey)
+		req.Header.Set("Authorization", "Bearer "+supabaseKey)
+		req.Header.Set("Content-Type", "application/json")
+		
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			var result []struct {
+				Response string `json:"response"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && len(result) > 0 {
+				p.registerCacheHit(w, []byte(result[0].Response), "SEMANTIC")
+				return true
+			}
+		}
+	} else {
+		// Fallback local memory L2
+		semanticMu.RLock()
+		defer semanticMu.RUnlock()
+		for _, entry := range semanticStore {
+			if entry.CompanyID == companyID {
+				if cosineSimilarity(emb, entry.Embedding) > SemanticThreshold {
+					p.registerCacheHit(w, entry.Response, "SEMANTIC")
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func (p *BifrostProxy) registerCacheHit(w http.ResponseWriter, payload []byte, hitType string) {
+	savings := 0.000015 // Default tiny fallback
+
+	// 1. Try Gemini Format
+	var geminiData struct {
+		UsageMetadata struct {
+			PromptTokenCount     float64 `json:"promptTokenCount"`
+			CandidatesTokenCount float64 `json:"candidatesTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	
+	// 2. Try OpenAI / standard format
+	var openaiData struct {
+		Usage struct {
+			PromptTokens     float64 `json:"prompt_tokens"`
+			CompletionTokens float64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(payload, &geminiData); err == nil && (geminiData.UsageMetadata.CandidatesTokenCount > 0 || geminiData.UsageMetadata.PromptTokenCount > 0) {
+		// Gemini 1.5 Flash Rate: $0.075/1M Input, $0.30/1M Output
+		inputSavings := geminiData.UsageMetadata.PromptTokenCount * 0.000000075
+		outputSavings := geminiData.UsageMetadata.CandidatesTokenCount * 0.00000030
+		savings = inputSavings + outputSavings
+	} else if err := json.Unmarshal(payload, &openaiData); err == nil && (openaiData.Usage.CompletionTokens > 0 || openaiData.Usage.PromptTokens > 0) {
+		// OpenAI GPT-4o Rate: $5.00/1M Input, $15.00/1M Output
+		inputSavings := openaiData.Usage.PromptTokens * 0.00000500
+		outputSavings := openaiData.Usage.CompletionTokens * 0.00001500
+		savings = inputSavings + outputSavings
+	}
+
+	metrics.mu.Lock()
+	metrics.CacheHits++
+	metrics.TotalSavings += savings
+	metrics.mu.Unlock()
+
+	log.Printf("[CACHE] stored responce used (%s) - Saved: $%.6f", hitType, savings)
+
+	w.Header().Set("X-Bifrost-Cache", hitType)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(payload)
+}
