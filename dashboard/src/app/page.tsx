@@ -19,7 +19,7 @@ export default function Dashboard() {
   // Dashboard State
   const [activeTab, setActiveTab] = useState<'DASHBOARD' | 'VAULT' | 'PLAYGROUND'>('DASHBOARD');
   const [cacheEnabled, setCacheEnabled] = useState(true);
-  const { metrics, fingerprints, mcpLogs } = useMetrics();
+  const { metrics, fingerprints, mcpLogs } = useMetrics(session?.user?.id);
 
   const currentLatency = metrics.length ? metrics[metrics.length - 1].latency : 0;
   const currentSavings = metrics.length ? metrics[metrics.length - 1].savings : 0;
@@ -154,6 +154,11 @@ export default function Dashboard() {
         .then(({ data }) => {
           if (data) setSavedKeys(data);
         });
+    } else {
+      setSavedKeys([]);
+      setGeneratedKey(null);
+      setRealKey('');
+      setNewRealKey('');
     }
   }, [session]);
 

@@ -103,13 +103,9 @@ CREATE TABLE IF NOT EXISTS bifrost_metrics (
 ALTER TABLE bifrost_metrics ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Allow public read access to metrics" ON bifrost_metrics;
-CREATE POLICY "Allow public read access to metrics" ON bifrost_metrics
-  FOR SELECT USING (true);
-
--- Seed default global metrics row if not exists
-INSERT INTO bifrost_metrics (id, request_count, cache_hits, blocked_attacks, total_savings)
-VALUES ('global', 0, 0, 0, 0.0)
-ON CONFLICT (id) DO NOTHING;
+DROP POLICY IF EXISTS "Users can view their own metrics" ON bifrost_metrics;
+CREATE POLICY "Users can view their own metrics" ON bifrost_metrics
+  FOR SELECT USING (auth.uid()::text = id);
 
 -- ============================================
 -- ✅ Setup Complete!

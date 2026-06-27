@@ -22,21 +22,28 @@ export type MCPLog = {
   time: string;
 };
 
-export function useMetrics() {
+export function useMetrics(companyId: string | undefined) {
   const [metrics, setMetrics] = useState<MetricData[]>([]);
   const [fingerprints, setFingerprints] = useState<FingerprintLog[]>([]);
   const [mcpLogs, setMcpLogs] = useState<MCPLog[]>([]);
 
   useEffect(() => {
-    // Fetch initial metrics from Supabase to prevent 0-flicker on load
+    if (!companyId) {
+      setMetrics([]);
+      setFingerprints([]);
+      setMcpLogs([]);
+      return;
+    }
+
+    // Fetch initial metrics from Supabase for this specific company to prevent 0-flicker on load
     supabase.from('bifrost_metrics')
       .select('request_count, cache_hits, blocked_attacks, total_savings')
-      .eq('id', 'global')
+      .eq('id', companyId)
       .maybeSingle()
       .then(({ data }) => {
         if (data) {
           const initialMetric = {
-            timestamp: new Date().toLocaleTimeString(),
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
             latency: 0,
             savings: data.total_savings,
             request_count: data.request_count,
@@ -44,12 +51,22 @@ export function useMetrics() {
             blocked_attacks: data.blocked_attacks
           };
           setMetrics([initialMetric]);
+        } else {
+          const initialMetric = {
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }),
+            latency: 0,
+            savings: 0,
+            request_count: 0,
+            cache_hits: 0,
+            blocked_attacks: 0
+          };
+          setMetrics([initialMetric]);
         }
       });
 
     // In production, this points to wss://bifrost-proxy/ws/metrics
     const httpUrl = process.env.NEXT_PUBLIC_PROXY_URL || 'http://localhost:8080';
-    const wsUrl = httpUrl.replace(/^http/, 'ws') + '/ws/metrics';
+    const wsUrl = httpUrl.replace(/^http/, 'ws') + `/ws/metrics?company_id=${companyId}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -72,12 +89,10 @@ export function useMetrics() {
       }
     };
 
-// Mock data removed for live WebSocket demonstration
-
     return () => {
       ws.close();
     };
-  }, []);
+  }, [companyId]);
 
   return { metrics, fingerprints, mcpLogs };
 }

@@ -170,7 +170,7 @@ var upgrader = websocket.Upgrader{
 }
 
 type WSHub struct {
-	clients map[*websocket.Conn]bool
+	clients map[*websocket.Conn]string
 	mu      sync.Mutex
 }
 
@@ -185,16 +185,53 @@ func (h *WSHub) broadcast(message []byte) {
 	}
 }
 
-var wsHub = &WSHub{clients: make(map[*websocket.Conn]bool)}
+func (h *WSHub) broadcastToCompany(companyID string, message []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for client, compID := range h.clients {
+		if compID == companyID {
+			if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
+				client.Close()
+				delete(h.clients, client)
+			}
+		}
+	}
+}
+
+var wsHub = &WSHub{clients: make(map[*websocket.Conn]string)}
 var globalProxy *BifrostProxy
+
+type CompanyMetrics struct {
+	RequestCount   int64
+	CacheHits      int64
+	BlockedAttacks int64
+	TotalSavings   float64
+}
+
+var companyMetrics = make(map[string]*CompanyMetrics)
+var metricsMu sync.RWMutex
+
+func getOrCreateCompanyMetrics(companyID string) *CompanyMetrics {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
+	
+	m, ok := companyMetrics[companyID]
+	if !ok {
+		m = &CompanyMetrics{}
+		companyMetrics[companyID] = m
+	}
+	return m
+}
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
+	companyID := r.URL.Query().Get("company_id")
+	
 	wsHub.mu.Lock()
-	wsHub.clients[conn] = true
+	wsHub.clients[conn] = companyID
 	wsHub.mu.Unlock()
 
 	for {
@@ -211,39 +248,60 @@ func startBroadcastLoop() {
 	ticker := time.NewTicker(1 * time.Second)
 	saveCounter := 0
 	for range ticker.C {
-		metrics.mu.RLock()
-		payload := map[string]interface{}{
-			"type": "METRIC",
-			"payload": map[string]interface{}{
-				"timestamp":       time.Now().Unix(),
-				"latency":         metrics.CurrentLatency,
-				"savings":         metrics.TotalSavings,
-				"request_count":   metrics.RequestCount,
-				"cache_hits":      metrics.CacheHits,
-				"blocked_attacks": metrics.BlockedAttacks,
-			},
+		wsHub.mu.Lock()
+		clientsCopy := make(map[*websocket.Conn]string)
+		for c, compID := range wsHub.clients {
+			clientsCopy[c] = compID
 		}
-		metrics.mu.RUnlock()
+		wsHub.mu.Unlock()
 
-		msg, _ := json.Marshal(payload)
-		wsHub.broadcast(msg)
+		for client, compID := range clientsCopy {
+			if compID == "" {
+				continue
+			}
+			
+			metricsMu.RLock()
+			var reqCount, cacheHits, blocked int64
+			var savings float64
+			if m, ok := companyMetrics[compID]; ok {
+				reqCount = m.RequestCount
+				cacheHits = m.CacheHits
+				blocked = m.BlockedAttacks
+				savings = m.TotalSavings
+			}
+			metricsMu.RUnlock()
+
+			payload := map[string]interface{}{
+				"type": "METRIC",
+				"payload": map[string]interface{}{
+					"timestamp":       time.Now().Unix(),
+					"latency":         metrics.CurrentLatency,
+					"savings":         savings,
+					"request_count":   reqCount,
+					"cache_hits":      cacheHits,
+					"blocked_attacks": blocked,
+				},
+			}
+			msg, _ := json.Marshal(payload)
+			client.WriteMessage(websocket.TextMessage, msg)
+		}
 
 		saveCounter++
 		if saveCounter >= 5 {
 			saveCounter = 0
 			if globalProxy != nil {
-				go globalProxy.saveGlobalMetrics()
+				go globalProxy.saveAllCompanyMetrics()
 			}
 		}
 	}
 }
 
-func pushWSEvent(eventType string, payload interface{}) {
+func pushWSEvent(eventType string, companyID string, payload interface{}) {
 	msg, _ := json.Marshal(map[string]interface{}{
 		"type":    eventType,
 		"payload": payload,
 	})
-	wsHub.broadcast(msg)
+	wsHub.broadcastToCompany(companyID, msg)
 }
 
 // --- Infrastructure ---
@@ -715,11 +773,24 @@ func (p *BifrostProxy) handleSettings(w http.ResponseWriter, r *http.Request) {
 
 func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	companyID := "default"
+	
+	bifrostKey := r.Header.Get("X-Bifrost-Key")
+	if bifrostKey != "" {
+		if cid, err := p.kvStore.Get("key_company:" + bifrostKey); err == nil && cid != "" {
+			companyID = cid
+		}
+	}
+
 	defer func() {
 		metrics.mu.Lock()
 		metrics.CurrentLatency = time.Since(start).Microseconds()
-		metrics.RequestCount++
 		metrics.mu.Unlock()
+
+		m := getOrCreateCompanyMetrics(companyID)
+		metricsMu.Lock()
+		m.RequestCount++
+		metricsMu.Unlock()
 	}()
 
 	valid, _ := p.validateIdentity(r)
@@ -749,7 +820,7 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if count >= limit {
 		// Log WebSocket event as denied MCP/limit action
-		pushWSEvent("MCP", map[string]interface{}{
+		pushWSEvent("MCP", companyID, map[string]interface{}{
 			"id":     fmt.Sprintf("%d", time.Now().UnixNano()),
 			"device": "0x" + deviceID[:4],
 			"action": "Rate Limit Exceeded",
@@ -760,13 +831,6 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.kvStore.Set(rateLimitKey, fmt.Sprintf("%d", count+1), 2*time.Minute)
-
-	// Extract Company ID to pass into context
-	bifrostKey := r.Header.Get("X-Bifrost-Key")
-	companyID, err := p.kvStore.Get("key_company:" + bifrostKey)
-	if err != nil {
-		companyID = "default"
-	}
 
 	if r.ContentLength > MaxBodySize {
 		w.Header().Set("X-Bifrost-Bypass", "true")
@@ -796,7 +860,7 @@ func (p *BifrostProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Run threat audit synchronously on all requests to block malicious injections instantly
 	if !p.circuitBreaker.IsOpen() {
-		if blocked := p.auditRequestSync(bodyBytes, r.Header.Get("X-Device-ID")); blocked {
+		if blocked := p.auditRequestSync(bodyBytes, r.Header.Get("X-Device-ID"), companyID); blocked {
 			http.Error(w, `{"error": "Blocked by Sovereign Interceptor"}`, http.StatusForbidden)
 			return
 		}
@@ -889,7 +953,7 @@ func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, co
 				Response string `json:"response"`
 			}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && len(result) > 0 {
-				p.registerCacheHit(w, []byte(result[0].Response), "DIRECT")
+				p.registerCacheHit(w, []byte(result[0].Response), "DIRECT", companyID)
 				return true
 			}
 		}
@@ -897,7 +961,7 @@ func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, co
 		// Fallback local memory L1
 		cached, err := p.kvStore.GetBytes("cache:direct:" + companyID + ":" + hashStr)
 		if err == nil {
-			p.registerCacheHit(w, cached, "DIRECT")
+			p.registerCacheHit(w, cached, "DIRECT", companyID)
 			return true
 		}
 	}
@@ -931,7 +995,7 @@ func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, co
 				Response string `json:"response"`
 			}
 			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && len(result) > 0 {
-				p.registerCacheHit(w, []byte(result[0].Response), "SEMANTIC")
+				p.registerCacheHit(w, []byte(result[0].Response), "SEMANTIC", companyID)
 				return true
 			}
 		}
@@ -942,7 +1006,7 @@ func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, co
 		for _, entry := range semanticStore {
 			if entry.CompanyID == companyID {
 				if cosineSimilarity(emb, entry.Embedding) > SemanticThreshold {
-					p.registerCacheHit(w, entry.Response, "SEMANTIC")
+					p.registerCacheHit(w, entry.Response, "SEMANTIC", companyID)
 					return true
 				}
 			}
@@ -952,7 +1016,7 @@ func (p *BifrostProxy) checkSemanticCache(w http.ResponseWriter, body []byte, co
 	return false
 }
 
-func (p *BifrostProxy) registerCacheHit(w http.ResponseWriter, payload []byte, hitType string) {
+func (p *BifrostProxy) registerCacheHit(w http.ResponseWriter, payload []byte, hitType string, companyID string) {
 	savings := 0.000015 // Default tiny fallback
 
 	// 1. Try Gemini Format
@@ -983,10 +1047,11 @@ func (p *BifrostProxy) registerCacheHit(w http.ResponseWriter, payload []byte, h
 		savings = inputSavings + outputSavings
 	}
 
-	metrics.mu.Lock()
-	metrics.CacheHits++
-	metrics.TotalSavings += savings
-	metrics.mu.Unlock()
+	m := getOrCreateCompanyMetrics(companyID)
+	metricsMu.Lock()
+	m.CacheHits++
+	m.TotalSavings += savings
+	metricsMu.Unlock()
 
 	log.Printf("[CACHE] stored response used (%s) - Saved: $%.6f", hitType, savings)
 
@@ -1007,25 +1072,11 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 		return false, false
 	}
 
-	isBlacklisted, _ := p.kvStore.Get("blacklist:" + deviceID)
-	if isBlacklisted == "true" {
-		p.pushFingerprintLog(deviceID, fingerprint, "BLOCKED")
-		return false, false
-	}
+	// Resolve company ID and app secret
+	companyID, _ := p.kvStore.Get("key_company:" + bifrostKey)
+	appSecret, _ := p.kvStore.Get("app_secret:" + bifrostKey)
 
-	ts, err := strconv.ParseInt(timestampStr, 10, 64)
-	if err != nil {
-		return false, false
-	}
-
-	if diff := time.Now().Unix() - ts; diff > ReplayWindowSecs || diff < -ReplayWindowSecs {
-		p.pushFingerprintLog(deviceID, fingerprint, "BLOCKED")
-		return false, false
-	}
-
-	appSecret, err := p.kvStore.Get("app_secret:" + bifrostKey)
-	if err != nil {
-		// Attempt to lazily load from Supabase if not in memory
+	if companyID == "" || appSecret == "" {
 		supabaseUrl := os.Getenv("SUPABASE_URL")
 		supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
 		if supabaseUrl != "" && supabaseKey != "" {
@@ -1040,6 +1091,7 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 					AppSecret string `json:"app_secret"`
 				}
 				if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
+					companyID = result[0].CompanyID
 					appSecret = result[0].AppSecret
 					p.kvStore.Set("key_map:"+bifrostKey, result[0].RealKey, 5 * time.Minute)
 					p.kvStore.Set("key_company:"+bifrostKey, result[0].CompanyID, 5 * time.Minute)
@@ -1048,10 +1100,29 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 				resp.Body.Close()
 			}
 		}
+	}
 
-		if appSecret == "" {
-			appSecret = "default-app-secret-123"
-		}
+	if companyID == "" {
+		companyID = "default"
+	}
+	if appSecret == "" {
+		appSecret = "default-app-secret-123"
+	}
+
+	isBlacklisted, _ := p.kvStore.Get("blacklist:" + deviceID)
+	if isBlacklisted == "true" {
+		p.pushFingerprintLog(companyID, deviceID, fingerprint, "BLOCKED")
+		return false, false
+	}
+
+	ts, err := strconv.ParseInt(timestampStr, 10, 64)
+	if err != nil {
+		return false, false
+	}
+
+	if diff := time.Now().Unix() - ts; diff > ReplayWindowSecs || diff < -ReplayWindowSecs {
+		p.pushFingerprintLog(companyID, deviceID, fingerprint, "BLOCKED")
+		return false, false
 	}
 
 	message := fmt.Sprintf("%s%s%s", deviceID, appSecret, timestampStr)
@@ -1060,7 +1131,7 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 	expectedFingerprint := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(expectedFingerprint), []byte(fingerprint)) {
-		p.pushFingerprintLog(deviceID, fingerprint, "BLOCKED")
+		p.pushFingerprintLog(companyID, deviceID, fingerprint, "BLOCKED")
 		return false, false
 	}
 
@@ -1071,16 +1142,16 @@ func (p *BifrostProxy) validateIdentity(r *http.Request) (valid bool, quarantine
 	}
 
 	if trustScore < 50 {
-		p.pushFingerprintLog(deviceID, fingerprint, "QUARANTINE")
+		p.pushFingerprintLog(companyID, deviceID, fingerprint, "QUARANTINE")
 		return true, true
 	}
 
-	p.pushFingerprintLog(deviceID, fingerprint, "VALID")
+	p.pushFingerprintLog(companyID, deviceID, fingerprint, "VALID")
 	return true, false
 }
 
-func (p *BifrostProxy) pushFingerprintLog(deviceID, fingerprint, status string) {
-	pushWSEvent("FINGERPRINT", map[string]interface{}{
+func (p *BifrostProxy) pushFingerprintLog(companyID, deviceID, fingerprint, status string) {
+	pushWSEvent("FINGERPRINT", companyID, map[string]interface{}{
 		"id":          fmt.Sprintf("%d", time.Now().UnixNano()),
 		"fingerprint": "0x" + fingerprint[:8],
 		"status":      status,
@@ -1096,6 +1167,11 @@ func (p *BifrostProxy) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	deviceID := r.Header.Get("X-Device-ID")
+	bifrostKey := r.Header.Get("X-Bifrost-Key")
+	companyID, _ := p.kvStore.Get("key_company:" + bifrostKey)
+	if companyID == "" {
+		companyID = "default"
+	}
 	status := "DENIED"
 
 	if req.Method == "request_quota_increase" && req.Reason == "critical_task" {
@@ -1116,7 +1192,7 @@ func (p *BifrostProxy) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pushWSEvent("MCP", map[string]interface{}{
+	pushWSEvent("MCP", companyID, map[string]interface{}{
 		"id":     fmt.Sprintf("%d", time.Now().UnixNano()),
 		"device": "0x" + deviceID[:4],
 		"action": req.Reason,
@@ -1356,21 +1432,23 @@ func (p *BifrostProxy) runThreatAudit(body []byte, deviceID string) bool {
 	return false
 }
 
-func (p *BifrostProxy) auditRequestSync(body []byte, deviceID string) bool {
+func (p *BifrostProxy) auditRequestSync(body []byte, deviceID string, companyID string) bool {
 	blocked := p.runThreatAudit(body, deviceID)
 	if blocked {
-		metrics.mu.Lock()
-		metrics.BlockedAttacks++
-		metrics.mu.Unlock()
+		m := getOrCreateCompanyMetrics(companyID)
+		metricsMu.Lock()
+		m.BlockedAttacks++
+		metricsMu.Unlock()
 	}
 	return blocked
 }
 
-func (p *BifrostProxy) auditRequest(body []byte, deviceID string) {
+func (p *BifrostProxy) auditRequest(body []byte, deviceID string, companyID string) {
 	if blocked := p.runThreatAudit(body, deviceID); blocked {
-		metrics.mu.Lock()
-		metrics.BlockedAttacks++
-		metrics.mu.Unlock()
+		m := getOrCreateCompanyMetrics(companyID)
+		metricsMu.Lock()
+		m.BlockedAttacks++
+		metricsMu.Unlock()
 	}
 }
 
@@ -1380,64 +1458,72 @@ func (p *BifrostProxy) loadGlobalMetrics() {
 	if supabaseUrl == "" || supabaseKey == "" {
 		return
 	}
-	urlStr := fmt.Sprintf("%s/rest/v1/bifrost_metrics?id=eq.global", supabaseUrl)
+	urlStr := fmt.Sprintf("%s/rest/v1/bifrost_metrics", supabaseUrl)
 	req, _ := http.NewRequest("GET", urlStr, nil)
 	req.Header.Set("apikey", supabaseKey)
 	req.Header.Set("Authorization", "Bearer "+supabaseKey)
-	
+
 	resp, err := apiClient.Do(req)
 	if err == nil && resp.StatusCode == 200 {
 		var result []struct {
+			ID             string  `json:"id"`
 			RequestCount   int64   `json:"request_count"`
 			CacheHits      int64   `json:"cache_hits"`
 			BlockedAttacks int64   `json:"blocked_attacks"`
 			TotalSavings   float64 `json:"total_savings"`
 		}
-		if json.NewDecoder(resp.Body).Decode(&result) == nil && len(result) > 0 {
-			metrics.mu.Lock()
-			metrics.RequestCount = result[0].RequestCount
-			metrics.CacheHits = result[0].CacheHits
-			metrics.BlockedAttacks = result[0].BlockedAttacks
-			metrics.TotalSavings = result[0].TotalSavings
-			metrics.mu.Unlock()
-			log.Printf("[METRICS] Loaded persistent metrics: Req=%d, Hits=%d, Blocked=%d, Saved=$%.6f", 
-				result[0].RequestCount, result[0].CacheHits, result[0].BlockedAttacks, result[0].TotalSavings)
+		if json.NewDecoder(resp.Body).Decode(&result) == nil {
+			metricsMu.Lock()
+			for _, row := range result {
+				companyMetrics[row.ID] = &CompanyMetrics{
+					RequestCount:   row.RequestCount,
+					CacheHits:      row.CacheHits,
+					BlockedAttacks: row.BlockedAttacks,
+					TotalSavings:   row.TotalSavings,
+				}
+			}
+			metricsMu.Unlock()
+			log.Printf("[METRICS] Loaded persistent metrics for %d companies", len(result))
 		}
 		resp.Body.Close()
 	}
 }
 
-func (p *BifrostProxy) saveGlobalMetrics() {
+func (p *BifrostProxy) saveAllCompanyMetrics() {
 	supabaseUrl := os.Getenv("SUPABASE_URL")
 	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
 	if supabaseUrl == "" || supabaseKey == "" {
 		return
 	}
-	
-	metrics.mu.RLock()
-	reqCount := metrics.RequestCount
-	cacheHits := metrics.CacheHits
-	blocked := metrics.BlockedAttacks
-	savings := metrics.TotalSavings
-	metrics.mu.RUnlock()
-	
-	urlStr := fmt.Sprintf("%s/rest/v1/bifrost_metrics?id=eq.global", supabaseUrl)
-	payload := map[string]interface{}{
-		"request_count":   reqCount,
-		"cache_hits":      cacheHits,
-		"blocked_attacks": blocked,
-		"total_savings":   savings,
-		"updated_at":      time.Now().Format(time.RFC3339),
+
+	metricsMu.RLock()
+	metricsCopy := make(map[string]CompanyMetrics)
+	for compID, m := range companyMetrics {
+		metricsCopy[compID] = *m
 	}
-	jsonPayload, _ := json.Marshal(payload)
-	
-	req, _ := http.NewRequest("PATCH", urlStr, bytes.NewBuffer(jsonPayload))
-	req.Header.Set("apikey", supabaseKey)
-	req.Header.Set("Authorization", "Bearer "+supabaseKey)
-	req.Header.Set("Content-Type", "application/json")
-	
-	resp, err := apiClient.Do(req)
-	if err == nil && resp != nil {
-		resp.Body.Close()
+	metricsMu.RUnlock()
+
+	for compID, m := range metricsCopy {
+		payload := map[string]interface{}{
+			"id":              compID,
+			"request_count":   m.RequestCount,
+			"cache_hits":      m.CacheHits,
+			"blocked_attacks": m.BlockedAttacks,
+			"total_savings":   m.TotalSavings,
+			"updated_at":      time.Now().Format(time.RFC3339),
+		}
+		jsonPayload, _ := json.Marshal(payload)
+
+		urlStrUpsert := fmt.Sprintf("%s/rest/v1/bifrost_metrics", supabaseUrl)
+		req, _ := http.NewRequest("POST", urlStrUpsert, bytes.NewBuffer(jsonPayload))
+		req.Header.Set("apikey", supabaseKey)
+		req.Header.Set("Authorization", "Bearer "+supabaseKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Prefer", "resolution=merge-duplicates")
+
+		resp, err := apiClient.Do(req)
+		if err == nil && resp != nil {
+			resp.Body.Close()
+		}
 	}
 }
